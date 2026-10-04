@@ -81,7 +81,7 @@ func SendRecommendation() error {
 // lastClosedWeek returns the latest Thursday-to-Thursday week that arXiv has
 // fully announced. Submissions close at 18:00 UTC at the earliest and what
 // arrives after Thursday's cutoff isn't listed until the following week, so a
-// plain "last seven days" on a Saturday would never see those papers.
+// plain "last seven days" on a weekend would never see those papers.
 func lastClosedWeek(now time.Time) (time.Time, time.Time) {
 	now = now.UTC()
 	end := time.Date(now.Year(), now.Month(), now.Day(), 18, 0, 0, 0, time.UTC)
