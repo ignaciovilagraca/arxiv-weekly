@@ -15,7 +15,7 @@ import (
 	"arxiv-weekly/domain"
 )
 
-const model = "claude-sonnet-5-5"
+const model = "claude-opus-5-5"
 const maxTokens = 64000
 
 // A batch expires on its own after 24 hours.
