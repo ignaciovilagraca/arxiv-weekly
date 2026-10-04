@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Recommends the papers of the week. Arguments go to the program (--dry-run).
+# Recommends the papers of the week: ./run.sh prepare, then ./run.sh send.
 #
 # Runs from cron, which inherits none of the shell's environment, so the .env
 # beside this script is where the credentials come from. Nothing here is

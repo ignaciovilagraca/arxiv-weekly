@@ -15,12 +15,19 @@ import (
 )
 
 const interestsFile = "intereses.md"
+const pendingFile = "pending-message.html"
 const shortlistSize = 150
 const picks = 5
 
-// RecommendPapers picks the papers to read from the last closed week and
-// sends them to Telegram, or prints them when dryRun is set.
-func RecommendPapers(categories []string, dryRun bool) error {
+// PrepareRecommendation picks the papers to read from the last closed week
+// and leaves the message ready for SendRecommendation. It can take hours:
+// Claude answers through the Batches API.
+func PrepareRecommendation(categories []string) error {
+	// A message that was never sent belongs to a week that is already over.
+	if err := os.Remove(pendingFile); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
 	interests, err := os.ReadFile(interestsFile)
 	if err != nil {
 		return err
@@ -51,11 +58,24 @@ func RecommendPapers(categories []string, dryRun bool) error {
 	}
 
 	message := buildMessage(recommendations, len(papers), from, to)
-	if dryRun {
-		fmt.Println(message)
-		return nil
+	fmt.Println(message)
+	return os.WriteFile(pendingFile, []byte(message), 0o644)
+}
+
+// SendRecommendation sends the prepared message to Telegram.
+func SendRecommendation() error {
+	message, err := os.ReadFile(pendingFile)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("no recommendation is ready to send")
 	}
-	return telegram.SendMessage(message)
+	if err != nil {
+		return err
+	}
+
+	if err := telegram.SendMessage(string(message)); err != nil {
+		return err
+	}
+	return os.Remove(pendingFile)
 }
 
 // lastClosedWeek returns the latest Thursday-to-Thursday week that arXiv has

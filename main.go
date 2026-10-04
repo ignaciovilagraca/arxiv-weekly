@@ -1,8 +1,8 @@
 package main
 
 import (
-	"flag"
 	"log"
+	"os"
 
 	"arxiv-weekly/usecases"
 )
@@ -10,10 +10,20 @@ import (
 var categories = []string{"cs.AI", "cs.LG", "cs.CL"}
 
 func main() {
-	dryRun := flag.Bool("dry-run", false, "print the recommendation instead of sending it to Telegram")
-	flag.Parse()
+	if len(os.Args) != 2 {
+		log.Fatal("usage: arxiv-weekly prepare|send")
+	}
 
-	if err := usecases.RecommendPapers(categories, *dryRun); err != nil {
+	var err error
+	switch os.Args[1] {
+	case "prepare":
+		err = usecases.PrepareRecommendation(categories)
+	case "send":
+		err = usecases.SendRecommendation()
+	default:
+		log.Fatal("usage: arxiv-weekly prepare|send")
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }

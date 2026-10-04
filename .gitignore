@@ -3,3 +3,6 @@
 
 # Credentials
 .env
+
+# Recommendation waiting to be sent
+pending-message.html

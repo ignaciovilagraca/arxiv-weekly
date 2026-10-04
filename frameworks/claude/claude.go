@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -14,8 +15,12 @@ import (
 	"arxiv-weekly/domain"
 )
 
-const model = "claude-opus-5-5"
+const model = "claude-sonnet-5-5"
 const maxTokens = 64000
+
+// A batch expires on its own after 24 hours.
+const batchDeadline = 25 * time.Hour
+const pollInterval = time.Minute
 
 const shortlistPrompt = `You are helping a reader choose what to read from this week's arXiv AI papers.
 
@@ -135,35 +140,45 @@ func Pick(papers []domain.Paper, interests string, n int) ([]domain.Recommendati
 	return picks, nil
 }
 
-// ask sends one request and decodes the JSON answer into out. It streams
-// because the input is long, and opts into the server-side fallback so a week
-// with a paper the safety classifiers decline doesn't end without an answer.
+// ask gets the JSON answer to one request and decodes it into out. It goes
+// through the Batches API, which costs half and answers within a day. Batches
+// can't fall back to another model when the safety classifiers decline a
+// request, so a declined one is asked again right away, at full price.
 func ask(system, user string, effort anthropic.BetaOutputConfigEffort, schema map[string]any, out any) error {
 	client := anthropic.NewClient(option.WithAPIKey(config.MustGet("ARXIV_WEEKLY_ANTHROPIC_API_KEY")))
-
-	stream := client.Beta.Messages.NewStreaming(context.Background(), anthropic.BetaMessageNewParams{
-		Model:     model,
-		MaxTokens: maxTokens,
-		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_07_01},
-		Fallbacks: anthropic.BetaFallbacksParamOfDefault(),
-		System:    []anthropic.BetaTextBlockParam{{Text: system}},
-		Messages: []anthropic.BetaMessageParam{
-			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(user)),
-		},
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: effort,
-			Format: anthropic.BetaJSONOutputFormatParam{Schema: schema},
-		},
-	})
-
-	message := anthropic.BetaMessage{}
-	for stream.Next() {
-		if err := message.Accumulate(stream.Current()); err != nil {
-			return fmt.Errorf("claude: %w", err)
-		}
+	messages := []anthropic.BetaMessageParam{
+		anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(user)),
 	}
-	if err := stream.Err(); err != nil {
-		return fmt.Errorf("claude: %w", err)
+	outputConfig := anthropic.BetaOutputConfigParam{
+		Effort: effort,
+		Format: anthropic.BetaJSONOutputFormatParam{Schema: schema},
+	}
+
+	message, err := askInBatch(client, anthropic.BetaMessageBatchNewParamsRequestParams{
+		Model:        model,
+		MaxTokens:    maxTokens,
+		System:       []anthropic.BetaTextBlockParam{{Text: system}},
+		Messages:     messages,
+		OutputConfig: outputConfig,
+	})
+	if err != nil {
+		return err
+	}
+
+	if message.StopReason == anthropic.BetaStopReasonRefusal {
+		log.Printf("claude: batch request declined (%s), asking again with fallback", message.StopDetails.Category)
+		message, err = askNow(client, anthropic.BetaMessageNewParams{
+			Model:        model,
+			MaxTokens:    maxTokens,
+			Betas:        []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_07_01},
+			Fallbacks:    anthropic.BetaFallbacksParamOfDefault(),
+			System:       []anthropic.BetaTextBlockParam{{Text: system}},
+			Messages:     messages,
+			OutputConfig: outputConfig,
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	log.Printf("claude: model %s, %d input tokens, %d output tokens",
@@ -186,4 +201,65 @@ func ask(system, user string, effort anthropic.BetaOutputConfigEffort, schema ma
 		return fmt.Errorf("claude: unreadable answer: %w", err)
 	}
 	return nil
+}
+
+// askInBatch submits a batch of one request and waits for its answer.
+func askInBatch(client anthropic.Client, params anthropic.BetaMessageBatchNewParamsRequestParams) (*anthropic.BetaMessage, error) {
+	ctx := context.Background()
+
+	batch, err := client.Beta.Messages.Batches.New(ctx, anthropic.BetaMessageBatchNewParams{
+		Requests: []anthropic.BetaMessageBatchNewParamsRequest{{CustomID: "request", Params: params}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
+	}
+	log.Printf("claude: batch %s submitted", batch.ID)
+
+	deadline := time.Now().Add(batchDeadline)
+	for batch.ProcessingStatus != anthropic.BetaMessageBatchProcessingStatusEnded {
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("claude: batch %s still running after %s", batch.ID, batchDeadline)
+		}
+		time.Sleep(pollInterval)
+
+		// A failed poll is not a failed batch: keep the last known state.
+		polled, err := client.Beta.Messages.Batches.Get(ctx, batch.ID, anthropic.BetaMessageBatchGetParams{})
+		if err != nil {
+			log.Printf("claude: polling batch %s: %v", batch.ID, err)
+			continue
+		}
+		batch = polled
+	}
+
+	results := client.Beta.Messages.Batches.ResultsStreaming(ctx, batch.ID, anthropic.BetaMessageBatchResultsParams{})
+	for results.Next() {
+		switch result := results.Current().Result.AsAny().(type) {
+		case anthropic.BetaMessageBatchSucceededResult:
+			return &result.Message, nil
+		case anthropic.BetaMessageBatchErroredResult:
+			return nil, fmt.Errorf("claude: batch %s: %s", batch.ID, result.Error.Error.Message)
+		default:
+			return nil, fmt.Errorf("claude: batch %s ended without an answer (%s)", batch.ID, results.Current().Result.Type)
+		}
+	}
+	if err := results.Err(); err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
+	}
+	return nil, fmt.Errorf("claude: batch %s returned no results", batch.ID)
+}
+
+// askNow sends the request directly. It streams because the input is long.
+func askNow(client anthropic.Client, params anthropic.BetaMessageNewParams) (*anthropic.BetaMessage, error) {
+	stream := client.Beta.Messages.NewStreaming(context.Background(), params)
+
+	message := anthropic.BetaMessage{}
+	for stream.Next() {
+		if err := message.Accumulate(stream.Current()); err != nil {
+			return nil, fmt.Errorf("claude: %w", err)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
+	}
+	return &message, nil
 }
