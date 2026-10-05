@@ -14,5 +14,9 @@ if [[ -f "$REPO/.env" ]]; then
   set +a
 fi
 
+# The claude CLI, the fallback when the API key has no credits, lives outside
+# cron's PATH.
+export PATH="$HOME/.local/bin:$PATH"
+
 cd "$REPO"
 go run . "$@"

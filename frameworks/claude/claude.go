@@ -140,11 +140,32 @@ func Pick(papers []domain.Paper, interests string, n int) ([]domain.Recommendati
 	return picks, nil
 }
 
-// ask gets the JSON answer to one request and decodes it into out. It goes
-// through the Batches API, which costs half and answers within a day. Batches
-// can't fall back to another model when the safety classifiers decline a
-// request, so a declined one is asked again right away, at full price.
+// ask gets the JSON answer to one request and decodes it into out. It asks
+// the API; when the API key has run out of credits it asks the claude CLI
+// instead, which is billed to the Claude subscription.
 func ask(system, user string, effort anthropic.BetaOutputConfigEffort, schema map[string]any, out any) error {
+	err := askAPI(system, user, effort, schema, out)
+	if err != nil && outOfCredits(err) {
+		log.Printf("%v", err)
+		log.Printf("claude: the API key is out of credits, asking through the claude CLI")
+		return askCLI(system, user, string(effort), schema, out)
+	}
+	return err
+}
+
+// outOfCredits tells an API key without balance from any other failure. The
+// API answers "Your credit balance is too low to access the Anthropic API",
+// or with a billing_error.
+func outOfCredits(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "credit balance") || strings.Contains(text, "billing_error")
+}
+
+// askAPI goes through the Batches API, which costs half and answers within a
+// day. Batches can't fall back to another model when the safety classifiers
+// decline a request, so a declined one is asked again right away, at full
+// price.
+func askAPI(system, user string, effort anthropic.BetaOutputConfigEffort, schema map[string]any, out any) error {
 	client := anthropic.NewClient(option.WithAPIKey(config.MustGet("ARXIV_WEEKLY_ANTHROPIC_API_KEY")))
 	messages := []anthropic.BetaMessageParam{
 		anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(user)),
