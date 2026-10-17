@@ -1,0 +1,11 @@
+# IntelliJ folder
+.idea/
+
+# Credentials
+.env
+
+# Recommendation waiting to be sent
+pending-message.html
+
+# Held while prepare runs
+prepare.lock
